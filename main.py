@@ -16,8 +16,8 @@ API_HASH = "8b4fd9ef578af114502feeafa2d31938"
 BOT_TOKEN = "8313292799:AAHxjrKVfbaMTA89fasbJSva-2u55pzraJ4"      
 ADMIN_ID = 7525127704              
 LOG_CHANNEL = -1003513942313       
-FILE_CHANNEL = -1003534917482      
-MONGODB_URI = "mongodb+srv://Demo270:Demo270@cluster0.ls1igsg.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"   
+FILE_CHANNEL = --1003606044547      
+MONGODB_URI = "mongodb+srv://MDParvezHossain:MDParvezHossain@cluster0.pma8wsn.mongodb.net/?appName=Cluster0"   
 OWNER_USERNAME = "AkashDeveloperBot"   
 
 # ==================== ২. ডাটাবেস ও ক্লায়েন্ট সেটআপ ====================
