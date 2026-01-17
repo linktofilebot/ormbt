@@ -29,20 +29,21 @@ plans_col = db["plans"]
 
 app = Client("file_store_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ==================== ৩. সাহায্যকারী ফাংশনসমূহ ====================
+# ==================== ৩. উন্নত টাইম পার্সার ও সাহায্যকারী ফাংশনসমূহ ====================
 
-def parse_duration(t_str):
+def parse_duration_advanced(t_str):
+    """y=year, mo=month, w=week, d=day, h=hour, m=min, s=sec"""
     t_str = t_str.lower().strip()
     match = re.match(r"(\d+)([a-z]+)", t_str)
     if not match: return None
-    val, unit = int(match.group(1)), match.group(2)
-    if unit in ['y', 'year']: return timedelta(days=val * 365)
-    if unit in ['mo', 'month']: return timedelta(days=val * 30)
-    if unit in ['w', 'week']: return timedelta(weeks=val)
-    if unit in ['d', 'day']: return timedelta(days=val)
-    if unit in ['h', 'hour']: return timedelta(hours=val)
-    if unit in ['m', 'min']: return timedelta(minutes=val)
-    if unit in ['s', 'sec']: return timedelta(seconds=val)
+    value, unit = int(match.group(1)), match.group(2)
+    if unit in ['y', 'year']: return timedelta(days=value * 365)
+    if unit in ['mo', 'month']: return timedelta(days=value * 30)
+    if unit in ['w', 'week']: return timedelta(weeks=value)
+    if unit in ['d', 'day']: return timedelta(days=value)
+    if unit in ['h', 'hour']: return timedelta(hours=value)
+    if unit in ['m', 'min', 'minute']: return timedelta(minutes=value)
+    if unit in ['s', 'sec', 'second']: return timedelta(seconds=value)
     return None
 
 async def check_premium(user_id):
@@ -59,7 +60,7 @@ async def check_premium(user_id):
 async def get_shortlink(url):
     s = await settings_col.find_one({"id": "shortener"})
     if not s: return url
-    api_url = f"https://{s['value']['base_url']}/api?api={s['value']['api_key']}&url={url}"
+    api_url = f"https://{s['base_url']}/api?api={s['api_key']}&url={url}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(api_url, timeout=10) as res:
@@ -72,152 +73,178 @@ async def auto_delete_msg(chat_id, message_id, seconds):
     try: await app.delete_messages(chat_id, message_id)
     except: pass
 
-# ==================== ৪. কোর ফাইল ডেলিভারি লজিক ====================
+# ==================== ৪. ফাইল ডেলিভারি লজিক ====================
 
 async def send_files_logic(client, message, cmd_name, is_extra=False):
     user_id = message.from_user.id if hasattr(message, 'from_user') else message.chat.id
     
     if is_extra:
-        target = await settings_col.find_one({"id": "extra_channel"})
-        if not target: return await (message.reply if hasattr(message, 'reply') else message.message.reply)("❌ গেট ফাইল চ্যানেল সেট নেই।")
-        chat_id = target["value"]
-        db_key = "extra_files_global"
+        # শুধুমাত্র /extfile চ্যানেল থেকে ফাইল নিবে (বাটন ও /getfile এর জন্য)
+        extra_data = await settings_col.find_one({"id": "extra_channel"})
+        if not extra_data:
+            return await (message.reply if hasattr(message, 'reply') else message.message.reply)("❌ গেট ফাইল চ্যানেল সেট করা নেই। অ্যাডমিনকে `/extfile [ID]` ব্যবহার করতে বলুন।")
+        chat_id = extra_data["chat_id"]
+        db_cmd_key = "extra_files_global"
     else:
-        target = await channels_col.find_one({"command": cmd_name})
-        if not target: return await message.reply("❌ কমান্ডটি ডাটাবেসে নেই।")
-        chat_id = target["chat_id"]
-        db_key = cmd_name
+        # কাস্টম কমান্ডের চ্যানেল থেকে ফাইল নিবে (যেমন /movies)
+        channel_data = await channels_col.find_one({"command": cmd_name})
+        if not channel_data:
+            return await message.reply(f"❌ '{cmd_name}' কমান্ডটি সক্রিয় নয়।")
+        chat_id = channel_data["chat_id"]
+        db_cmd_key = cmd_name
 
     is_prem, _ = await check_premium(user_id)
     user_data = await users_col.find_one({"user_id": user_id}) or {}
     indices = user_data.get("indices", {})
-    idx = indices.get(db_key, 0)
+    current_idx = indices.get(db_cmd_key, 0)
     
-    limit_doc = await settings_col.find_one({"id": "video_limit"})
-    limit = limit_doc["value"] if limit_doc else 2
+    # অ্যাডমিন লিমিট চেক
+    v_limit_doc = await settings_col.find_one({"id": "video_limit"})
+    limit_val = v_limit_doc.get("count", 2) if v_limit_doc else 2
 
     if is_prem:
-        files = await files_col.find({"chat_id": chat_id}).sort("msg_id", 1).skip(idx).limit(limit).to_list(limit)
-        if not files:
-            indices[db_key] = 0
-            await users_col.update_one({"user_id": user_id}, {"$set": {"indices": indices}}, upsert=True)
-            return await (message.reply if hasattr(message, 'reply') else message.message.reply)("✅ সব ভিডিও শেষ! আবার শুরু থেকে দেখতে ট্রাই করুন।")
+        # শুধুমাত্র নির্দিষ্ট চ্যানেলের ভিডিওগুলো নিবে
+        files = await files_col.find({"chat_id": chat_id}).sort("msg_id", 1).skip(current_idx).limit(limit_val).to_list(limit_val)
         
-        timer_doc = await settings_col.find_one({"id": "auto_delete"})
-        protect_doc = await settings_col.find_one({"id": "protect"})
-        protect = protect_doc["value"] if protect_doc else False
+        if not files:
+            indices[db_cmd_key] = 0
+            await users_col.update_one({"user_id": user_id}, {"$set": {"indices": indices}}, upsert=True)
+            return await (message.reply if hasattr(message, 'reply') else message.message.reply)("✅ সব ভিডিও দেখা শেষ! আবার শুরু থেকে দেখতে ট্রাই করুন।")
+        
+        timer_data = await settings_col.find_one({"id": "auto_delete"})
+        protect = (await settings_col.find_one({"id": "forward_setting"}) or {}).get("protect", False)
 
         for f in files:
             try:
                 sent = await client.copy_message(user_id, f["chat_id"], f["msg_id"], protect_content=protect)
-                if sent and timer_doc: asyncio.create_task(auto_delete_msg(user_id, sent.id, timer_doc["value"]))
+                if sent and timer_data:
+                    asyncio.create_task(auto_delete_msg(user_id, sent.id, timer_data["seconds"]))
             except: continue
         
-        indices[db_key] = idx + len(files)
+        indices[db_cmd_key] = current_idx + len(files)
         await users_col.update_one({"user_id": user_id}, {"$set": {"indices": indices}}, upsert=True)
     else:
+        # ফ্রি ইউজার ভেরিফিকেশন লিঙ্ক
         me = await client.get_me()
         v_type = "extra" if is_extra else cmd_name
-        v_url = await get_shortlink(f"https://t.me/{me.username}?start=verify_{v_type}")
-        btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 ভেরিফাই লিংক", url=v_url)]])
-        txt = "🚫 **ভেরিফিকেশন আবশ্যক!**\n\nফাইল পেতে নিচের লিংকে ক্লিক করে ভেরিফাই করুন। প্রিমিয়াম হলে সরাসরি পাবেন।"
-        if hasattr(message, 'reply'): await message.reply(txt, reply_markup=btn)
-        else: await message.message.reply(txt, reply_markup=btn)
+        verify_url = f"https://t.me/{me.username}?start=verify_{v_type}"
+        short_link = await get_shortlink(verify_url)
+        btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 ভেরিফাই লিংক", url=short_link)]])
+        text = "🚫 **ভেরিফিকেশন আবশ্যক!**\n\nফাইল পেতে নিচের লিংকে ক্লিক করে ভেরিফাই করুন। প্রিমিয়াম মেম্বার হলে সরাসরি পাবেন।"
+        if hasattr(message, 'reply'): await message.reply(text, reply_markup=btn)
+        else: await message.message.reply(text, reply_markup=btn)
 
 # ==================== ৫. অ্যাডমিন কমান্ডসমূহ ====================
 
-@app.on_message(filters.command("addcnl") & filters.user(ADMIN_ID))
-async def add_cnl(client, message):
-    if len(message.command) < 3: return await message.reply("📝 উদা: `/addcnl -100xxx movies`")
-    c_id, cmd = int(message.command[1]), message.command[2].lower()
-    chat = await client.get_chat(c_id)
-    await channels_col.update_one({"command": cmd}, {"$set": {"chat_id": c_id, "title": chat.title, "command": cmd}}, upsert=True)
-    st = await message.reply(f"✅ `{chat.title}` এখন `/{cmd}` এর জন্য লিঙ্কড। ইন্ডেক্সিং...")
-    count = 0
-    async for m in client.get_chat_history(c_id):
-        if m.video or m.document or m.audio:
-            await files_col.update_one({"chat_id": c_id, "msg_id": m.id}, {"$set": {"chat_id": c_id, "msg_id": m.id}}, upsert=True)
-            count += 1
-    await st.edit(f"✅ সম্পন্ন! মোট `{count}` ফাইল সেভ হয়েছে।")
-
 @app.on_message(filters.command("extfile") & filters.user(ADMIN_ID))
-async def ext_file_set(client, message):
-    if len(message.command) < 2: return await message.reply("📝 উদা: `/extfile -100xxx`")
-    c_id = int(message.command[1])
-    await settings_col.update_one({"id": "extra_channel"}, {"$set": {"value": c_id}}, upsert=True)
-    st = await message.reply("🚀 গেট ফাইল চ্যানেল সেট হচ্ছে...")
-    count = 0
-    async for m in client.get_chat_history(c_id):
-        if m.video or m.document or m.audio:
-            await files_col.update_one({"chat_id": c_id, "msg_id": m.id}, {"$set": {"chat_id": c_id, "msg_id": m.id}}, upsert=True)
-            count += 1
-    await st.edit(f"✅ সম্পন্ন! গেট ফাইল চ্যানেলে `{count}` ফাইল ইন্ডেক্স হয়েছে।")
+async def set_ext_channel(client, message):
+    if len(message.command) < 2: return await message.reply("উদা: `/extfile -100xxxx` (বাটনের ফাইল এর জন্য)")
+    try:
+        c_id = int(message.command[1])
+        chat = await client.get_chat(c_id)
+        await settings_col.update_one({"id": "extra_channel"}, {"$set": {"chat_id": c_id, "title": chat.title}}, upsert=True)
+        st = await message.reply(f"🚀 গেট ফাইল চ্যানেল সেট: `{chat.title}`\nইন্ডেক্সিং...")
+        count = 0
+        async for m in client.get_chat_history(c_id):
+            if m.video or m.document or m.audio:
+                await files_col.update_one({"chat_id": c_id, "msg_id": m.id}, {"$set": {"chat_id": c_id, "msg_id": m.id}}, upsert=True)
+                count += 1
+        await st.edit(f"✅ সম্পন্ন! গেট ফাইল বাটন এখন এই চ্যানেলের `{count}` ভিডিও দিবে।")
+    except Exception as e: await message.reply(f"❌ এরর: {e}")
+
+@app.on_message(filters.command("addcnl") & filters.user(ADMIN_ID))
+async def add_cnl_handler(client, message):
+    if len(message.command) < 3: return await message.reply("উদা: `/addcnl -100xxx movies` (কমান্ডের জন্য)")
+    try:
+        c_id, cmd = int(message.command[1]), message.command[2].lower()
+        chat = await client.get_chat(c_id)
+        await channels_col.update_one({"command": cmd}, {"$set": {"chat_id": c_id, "title": chat.title, "command": cmd}}, upsert=True)
+        st = await message.reply(f"✅ `{chat.title}` লিঙ্ক হয়েছে। ইন্ডেক্সিং...")
+        count = 0
+        async for m in client.get_chat_history(c_id):
+            if m.video or m.document or m.audio:
+                await files_col.update_one({"chat_id": c_id, "msg_id": m.id}, {"$set": {"chat_id": c_id, "msg_id": m.id}}, upsert=True)
+                count += 1
+        await st.edit(f"✅ সম্পন্ন! `/{cmd}` এখন এই চ্যানেলের `{count}` ফাইল দিবে।")
+    except Exception as e: await message.reply(f"❌ এরর: {e}")
 
 @app.on_message(filters.command("add_premium") & filters.user(ADMIN_ID))
-async def add_prem(client, message):
+async def add_prem_cmd(client, message):
     try:
         u_id, dur_str = int(message.command[1]), message.command[2]
-        dur = parse_duration(dur_str)
-        if not dur: return await message.reply("❌ ভুল ফরম্যাট! (y, mo, d, h)")
+        dur = parse_duration_advanced(dur_str)
+        if not dur: return await message.reply("❌ ভুল ফরম্যাট! (y, mo, w, d, h, m)")
         exp = datetime.now() + dur
         await users_col.update_one({"user_id": u_id}, {"$set": {"is_premium": True, "expiry_date": exp}}, upsert=True)
-        await message.reply(f"✅ ইউজার `{u_id}` প্রিমিয়াম হয়েছে। মেয়াদ: `{exp.strftime('%Y-%m-%d %H:%M')}`")
-    except: await message.reply("📝 উদা: `/add_premium ID 1mo` (বা 1y, 7d, 5h)")
+        await message.reply(f"✅ ইউজার `{u_id}` প্রিমিয়াম হয়েছে।\n📅 মেয়াদ: `{exp.strftime('%Y-%m-%d %H:%M')}`")
+    except: await message.reply("উদা: `/add_premium ID 1y` (বা 1mo, 7d)")
 
 @app.on_message(filters.command("remove_premium") & filters.user(ADMIN_ID))
-async def rem_prem(client, message):
+async def remove_prem_cmd(client, message):
     try:
         u_id = int(message.command[1])
         await users_col.update_one({"user_id": u_id}, {"$set": {"is_premium": False}, "$unset": {"expiry_date": ""}})
         await message.reply(f"✅ ইউজার `{u_id}` রিমুভ হয়েছে।")
-    except: await message.reply("📝 উদা: `/remove_premium ID`")
+    except: await message.reply("📝 উদা: `/remove_premium 12345`")
 
 @app.on_message(filters.command("premium_list") & filters.user(ADMIN_ID))
-async def prem_list(client, message):
+async def prem_list_cmd(client, message):
     users = await users_col.find({"is_premium": True}).to_list(None)
+    if not users: return await message.reply("ℹ️ কোনো প্রিমিয়াম মেম্বার নেই।")
     txt = "💎 **প্রিমিয়াম মেম্বার লিস্ট:**\n\n"
-    for u in users: txt += f"👤 `{u['user_id']}` | 📅 `{u.get('expiry_date').strftime('%Y-%m-%d %H:%M') if u.get('expiry_date') else 'Lifetime'}`\n"
-    await message.reply(txt if users else "ℹ️ কোনো প্রিমিয়াম মেম্বার নেই।")
+    for u in users:
+        exp = u.get('expiry_date')
+        txt += f"👤 `{u['user_id']}` | 📅 `{exp.strftime('%Y-%m-%d %H:%M') if exp else 'LifeTime'}`\n"
+    await message.reply(txt)
 
 @app.on_message(filters.command("set_timer") & filters.user(ADMIN_ID))
-async def set_timer(client, message):
+async def set_timer_cmd(client, message):
     try:
         sec = int(message.command[1])
-        await settings_col.update_one({"id": "auto_delete"}, {"$set": {"value": sec}}, upsert=True)
-        await message.reply(f"✅ অটো-ডিলিট টাইম `{sec}` সেকেন্ড সেট হয়েছে।")
+        await settings_col.update_one({"id": "auto_delete"}, {"$set": {"seconds": sec}}, upsert=True)
+        await message.reply(f"✅ অটো-ডিলিট `{sec}` সেকেন্ড সেট হয়েছে।")
     except: await message.reply("উদা: `/set_timer 600` (১০ মিনিট)")
 
 @app.on_message(filters.command("set_limit") & filters.user(ADMIN_ID))
-async def set_limit(client, message):
+async def set_limit_cmd(client, message):
     try:
         lim = int(message.command[1])
-        await settings_col.update_one({"id": "video_limit"}, {"$set": {"value": lim}}, upsert=True)
+        await settings_col.update_one({"id": "video_limit"}, {"$set": {"count": lim}}, upsert=True)
         await message.reply(f"✅ ভিডিও লিমিট `{lim}` সেট হয়েছে।")
     except: await message.reply("উদা: `/set_limit 5`")
 
 @app.on_message(filters.command("set_shortener") & filters.user(ADMIN_ID))
-async def set_short(client, message):
+async def set_short_cmd(client, message):
     try:
         url, key = message.command[1], message.command[2]
-        await settings_col.update_one({"id": "shortener"}, {"$set": {"value": {"base_url": url, "api_key": key}}}, upsert=True)
+        await settings_col.update_one({"id": "shortener"}, {"$set": {"base_url": url, "api_key": key}}, upsert=True)
         await message.reply("✅ শর্টনার সেট হয়েছে।")
     except: await message.reply("উদা: `/set_shortener domain.com key`")
 
 @app.on_message(filters.command("stats") & filters.user(ADMIN_ID))
-async def stats(client, message):
+async def stats_cmd(client, message):
     u = await users_col.count_documents({})
     p = await users_col.count_documents({"is_premium": True})
     f = await files_col.count_documents({})
     await message.reply(f"📊 **স্ট্যাটাস:**\n\n👤 ইউজার: `{u}`\n💎 প্রিমিয়াম: `{p}`\n📁 ফাইল: `{f}`")
 
-# ==================== ৬. ইউজার কমান্ডসমূহ ====================
+@app.on_message(filters.command("add_plan") & filters.user(ADMIN_ID))
+async def add_plan_cmd(client, message):
+    try:
+        name, price = message.command[1], message.command[2]
+        await plans_col.update_one({"name": name}, {"$set": {"price": price}}, upsert=True)
+        await message.reply(f"✅ প্ল্যান `{name}` সেট হয়েছে।")
+    except: await message.reply("উদা: `/add_plan 1Month 100Tk`")
+
+# ==================== ৬. ইউজার হ্যান্ডলার ও কমান্ডস ====================
 
 @app.on_message(filters.command("start") & filters.private)
-async def start_cmd(client, message):
+async def start_handler(client, message):
     user_id = message.from_user.id
     if len(message.command) > 1 and message.command[1].startswith("verify_"):
         v_type = message.command[1].replace("verify_", "")
-        return await send_files_logic(client, message, v_type, is_extra=(v_type == "extra"))
+        if v_type == "extra": return await send_files_logic(client, message, "", is_extra=True)
+        else: return await send_files_logic(client, message, v_type)
 
     is_prem, status = await check_premium(user_id)
     btn = InlineKeyboardMarkup([
@@ -247,31 +274,30 @@ async def cb_handler(client, query: CallbackQuery):
     await query.answer()
 
 @app.on_message(filters.command("getfile") & filters.private)
-async def getfile_cmd(client, message):
+async def getfile_direct(client, message):
     await send_files_logic(client, message, "", is_extra=True)
 
 @app.on_message(filters.text & filters.private)
-async def dynamic_detector(client, message):
+async def custom_detector(client, message):
     if not message.text.startswith("/"): return
     cmd = message.text.split()[0].replace("/", "").lower()
-    # প্রি-ডিফাইনড কমান্ড বাদ দিয়ে
     sys = ["start", "stats", "premium_list", "remove_premium", "add_premium", "addcnl", "extfile", "getfile", "set_timer", "set_limit", "set_shortener", "add_plan"]
     if cmd in sys: return
     exists = await channels_col.find_one({"command": cmd})
     if exists: await send_files_logic(client, message, cmd)
 
 @app.on_message((filters.video | filters.document | filters.audio) & ~filters.private)
-async def auto_save(client, message):
+async def auto_save_handler(client, message):
     is_saved = await channels_col.find_one({"chat_id": message.chat.id})
-    extra = await settings_col.find_one({"id": "extra_channel", "value": message.chat.id})
-    if is_saved or extra:
+    is_extra = await settings_col.find_one({"id": "extra_channel", "chat_id": message.chat.id})
+    if is_saved or is_extra:
         await files_col.update_one({"chat_id": message.chat.id, "msg_id": message.id}, {"$set": {"chat_id": message.chat.id, "msg_id": message.id}}, upsert=True)
 
-# ==================== ৭. মেইন ফাংশন ====================
+# ==================== ৭. রান ও ওয়েব সার্ভার ====================
 
 async def main():
     server = web.Application()
-    server.router.add_get("/", lambda r: web.Response(text="Running..."))
+    server.router.add_get("/", lambda r: web.Response(text="Bot is Alive!"))
     runner = web.AppRunner(server)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", 8080).start()
