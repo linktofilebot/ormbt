@@ -156,7 +156,7 @@ async def process_file_request(client, update, cmd_key, target_chat_id):
 
     if is_prem:
         limit_val = await get_video_limit()
-        # নির্দিষ্ট চ্যানেলের ফাইল খোঁজা
+        # নির্দিষ্ট চ্যানেলের ফাইল খোঁজা (সংশোধিত লজিক: মেইন ও কাস্টম আলাদা থাকবে)
         files = await files_col.find({"chat_id": target_chat_id}).sort("_id", 1).skip(current_idx).limit(limit_val).to_list(limit_val)
         
         if not files:
@@ -397,6 +397,7 @@ async def index_files_handler(client, message):
 
 @app.on_message(filters.command("batch_index") & filters.user(ADMIN_ID))
 async def batch_index_handler(client, message):
+    # এই কমান্ডটি সংশোধিত: ফাইল কপি না করে সরাসরি সোর্স চ্যানেল থেকে রেফারেন্স সেভ করবে।
     if len(message.command) < 2:
         return await message.reply("📝 **সঠিক নিয়ম:** `/batch_index [মেসেজ লিংক]`")
     link = message.command[1]
@@ -407,14 +408,15 @@ async def batch_index_handler(client, message):
     count = 0
     for i in range(1, last_id + 1):
         try:
-            msg = await client.copy_message(chat_id=FILE_CHANNEL, from_chat_id=chat_id, message_id=i)
-            if msg.video or msg.document or msg.audio:
-                await files_col.insert_one({"msg_id": msg.id, "chat_id": FILE_CHANNEL, "added_at": datetime.now()})
-                count += 1
+            msg = await client.get_messages(chat_id, i)
+            if msg and (msg.video or msg.document or msg.audio):
+                exists = await files_col.find_one({"msg_id": msg.id, "chat_id": chat_id})
+                if not exists:
+                    await files_col.insert_one({"msg_id": msg.id, "chat_id": chat_id, "added_at": datetime.now()})
+                    count += 1
             if i % 25 == 0: await status.edit(f"⏳ প্রসেসিং চলছে... সেভ হয়েছে: {count}")
-            await asyncio.sleep(0.5)
         except: continue
-    await status.edit(f"✅ সম্পন্ন! মোট সেভ হয়েছে: `{count}` টি।")
+    await status.edit(f"✅ সম্পন্ন! সোর্স চ্যানেল `{chat_id}` থেকে মোট সেভ হয়েছে: `{count}` টি।")
 
 @app.on_message(filters.command("cleardata") & filters.user(ADMIN_ID))
 async def cleardata_admin(client, message):
