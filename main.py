@@ -19,7 +19,7 @@ API_ID = 29904834
 API_HASH = "8b4fd9ef578af114502feeafa2d31938"        
 BOT_TOKEN = "8313292799:AAHxjrKVfbaMTA89fasbJSva-2u55pzraJ4"      
 ADMIN_ID = 7525127704              
-MONGODB_URI = "mongodb+srv://MDParvezHossain:MDParvezHossain@cluster0.pma8wsn.mongodb.net/?appName=Cluster0"   
+MONGODB_URI = "mongodb+srv://mdrafihossenarman1122334455q_db_user:premiumsex@cluster0.u8snlix.mongodb.net/?appName=Cluster0"   
 OWNER_USERNAME = "AkashDeveloperBot"   
 
 # ডিফল্ট সেটিংস
