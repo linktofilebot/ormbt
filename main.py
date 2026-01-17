@@ -34,7 +34,7 @@ app = Client("file_store_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_T
 
 # ==================== ৩. সাহায্যকারী ফাংশনসমূহ (Helpers) ====================
 
-# ভিডিও লিমিট ডাটাবেস থেকে নেওয়ার ফাংশন (নতুন যুক্ত)
+# ভিডিও লিমিট ডাটাবেস থেকে নেওয়ার ফাংশন
 async def get_video_limit():
     data = await settings_col.find_one({"id": "video_limit"})
     return data.get("count", 1) if data else 1
@@ -65,9 +65,7 @@ async def send_premium_report(client, user_id, expiry_date, method="Redeem Code"
             f"🚀 **প্রিমিয়াম মেম্বারশিপ আপডেট**\n\n"
             f"👤 **নাম:** {user.first_name}\n"
             f"🆔 **আইডি:** `{user.id}`\n"
-            f"🔗 **ইউজারনেম:** {username}\n"
             f"⏳ **মেয়াদ:** {readable_time}\n"
-            f"📅 **শেষ হবে:** {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"🛠 **পদ্ধতি:** {method}"
         )
         try:
@@ -119,7 +117,6 @@ async def auto_delete_msg(client, chat_id, message_id, seconds):
         await client.delete_messages(chat_id, message_id)
     except: pass
 
-# লিংক থেকে চ্যানেল আইডি এবং লাস্ট মেসেজ আইডি বের করার ফাংশন
 def parse_tg_link(link):
     regex = r"(?:https?://)?t\.me/(?:c/)?([^/]+)/(\d+)"
     match = re.search(regex, link)
@@ -133,9 +130,10 @@ def parse_tg_link(link):
         return chat_id, last_msg_id
     return None, None
 
-# ==================== ৪. ডাইনামিক ফাইল পাঠানোর মূল ফাংশন ====================
+# ==================== ৪. ডাইনামিক ফাইল পাঠানোর মূল ফাংশন (নতুন) ====================
 
 async def process_file_request(client, update, cmd_key, target_chat_id):
+    """এটি প্রিমিয়াম এবং ফ্রি ইউজারদের জন্য ফাইল পাঠানোর মেইন লজিক"""
     is_cb = isinstance(update, CallbackQuery)
     user_id = update.from_user.id
     
@@ -156,7 +154,7 @@ async def process_file_request(client, update, cmd_key, target_chat_id):
 
     if is_prem:
         limit_val = await get_video_limit()
-        # নির্দিষ্ট চ্যানেলের ফাইল খোঁজা (সংশোধিত লজিক: মেইন ও কাস্টম আলাদা থাকবে)
+        # নির্দিষ্ট চ্যানেলের ফাইল খোঁজা (সংশোধিত ফাইল স্কিমা অনুযায়ী)
         files = await files_col.find({"chat_id": target_chat_id}).sort("_id", 1).skip(current_idx).limit(limit_val).to_list(limit_val)
         
         if not files:
@@ -208,6 +206,7 @@ async def start_cmd(client, message):
         f_idx = user_data.get("f_index", 0)
         
         limit_val = await get_video_limit()
+        # মেইন চ্যানেলের ফাইল খোঁজা
         files = await files_col.find({"chat_id": FILE_CHANNEL}).sort("_id", 1).skip(f_idx).limit(limit_val).to_list(limit_val)
         
         if not files:
@@ -220,7 +219,7 @@ async def start_cmd(client, message):
         
         for f in files:
             try:
-                sent_msg = await client.copy_message(user_id, f["chat_id"], f["msg_id"], protect_content=p_on)
+                sent_msg = await client.copy_message(user_id, FILE_CHANNEL, f["msg_id"], protect_content=p_on)
                 if sent_msg and timer_data:
                     asyncio.create_task(auto_delete_msg(client, user_id, sent_msg.id, timer_data["seconds"]))
             except: pass
@@ -242,6 +241,7 @@ async def start_cmd(client, message):
 @app.on_callback_query(filters.regex("get_file_logic"))
 @app.on_message(filters.command("getfile"))
 async def getfile_handler(client, update):
+    # মেইন চ্যানেলের জন্য default কি ব্যবহার করা হয়েছে
     await process_file_request(client, update, "default", FILE_CHANNEL)
 
 @app.on_message(filters.command("skipfile"))
@@ -279,7 +279,6 @@ async def stats_handler(client, message):
         f"👥 **মোট ইউজার:** `{total_users}` জন\n"
         f"💎 **প্রিমিয়াম মেম্বার:** `{premium_users}` জন\n"
         f"👤 **সাধারণ মেম্বার:** `{regular_users}` জন\n\n"
-        f"📢 **যুক্ত চ্যানেল সংখ্যা:** `২টি` (File & Log)\n"
         "⚡ **বট স্ট্যাটাস:** সচল (Active)"
     )
     
@@ -329,16 +328,18 @@ async def redeem_cmd(client, message):
     await redeem_col.update_one({"code": code_str}, {"$set": {"is_used": True}})
     await send_premium_report(client, message.from_user.id, expiry, method=f"Redeem Code ({data['duration']})")
 
-# ==================== ৬. অ্যাডমিন কমান্ডসমূহ ====================
+# ==================== ৬. অ্যাডমিন কমান্ডসমূহ (Custom Cmd & Limits) ====================
 
 @app.on_message(filters.command("addcmd") & filters.user(ADMIN_ID))
 async def add_custom_cmd(client, message):
+    """কাস্টম কমান্ড যোগ করার অ্যাডমিন কমান্ড"""
     if len(message.command) < 3:
         return await message.reply("📝 **ব্যবহার:** `/addcmd [কমান্ড_নাম] [চ্যানেল_আইডি]`\n\nউদা: `/addcmd movies -10012345678`")
     
     cmd_name = message.command[1].lower().replace("/", "")
     try:
         chat_id = int(message.command[2])
+        # কমান্ড এবং চ্যানেল আইডি ডাটাবেসে সেভ করা
         await custom_cmds_col.update_one({"cmd": cmd_name}, {"$set": {"chat_id": chat_id}}, upsert=True)
         await message.reply(f"✅ সফল! এখন থেকে `/{cmd_name}` কমান্ড দিলে `{chat_id}` চ্যানেলের ফাইল যাবে।")
     except ValueError:
@@ -346,6 +347,7 @@ async def add_custom_cmd(client, message):
 
 @app.on_message(filters.command("delcmd") & filters.user(ADMIN_ID))
 async def del_custom_cmd(client, message):
+    """কাস্টম কমান্ড ডিলিট করার অ্যাডমিন কমান্ড"""
     if len(message.command) < 2:
         return await message.reply("📝 **ব্যবহার:** `/delcmd [কমান্ড_নাম]`")
     
@@ -357,11 +359,13 @@ async def del_custom_cmd(client, message):
 @app.on_message(filters.regex(r"^/"))
 async def dynamic_cmd_handler(client, message):
     cmd = message.text.split()[0].lower().replace("/", "")
-    # মেইন কমান্ডগুলো যেন ডিস্টার্ব না হয়
+    
+    # বটের মেইন কমান্ডগুলো ইগনোর করা
     main_cmds = ["start", "getfile", "stats", "plan", "redeem", "skipfile", "sendvideo", "index", "batch_index", "cleardata", "add_premium", "remove_premium", "add_redeem", "addplan", "delplan", "set_shortener", "del_shortener", "addtime", "deltime", "set_forward", "addcmd", "delcmd"]
     if cmd in main_cmds:
         return
 
+    # ডাটাবেসে কমান্ডটি আছে কিনা চেক করা
     data = await custom_cmds_col.find_one({"cmd": cmd})
     if data:
         await process_file_request(client, message, cmd, data["chat_id"])
@@ -385,6 +389,7 @@ async def index_files_handler(client, message):
     status_msg = await message.reply("🔍 ইন্ডেক্সিং শুরু হচ্ছে... অনুগ্রহ করে অপেক্ষা করুন।")
     count = 0
     try:
+        # মেইন চ্যানেলের ফাইল ইনডেক্স করা (নতুন স্ট্রাকচার: chat_id সহ)
         async for m in client.get_chat_history(FILE_CHANNEL):
             if m.video or m.document or m.audio:
                 exists = await files_col.find_one({"msg_id": m.id, "chat_id": FILE_CHANNEL})
@@ -397,31 +402,32 @@ async def index_files_handler(client, message):
 
 @app.on_message(filters.command("batch_index") & filters.user(ADMIN_ID))
 async def batch_index_handler(client, message):
-    # এই কমান্ডটি সংশোধিত: ফাইল কপি না করে সরাসরি সোর্স চ্যানেল থেকে রেফারেন্স সেভ করবে।
     if len(message.command) < 2:
         return await message.reply("📝 **সঠিক নিয়ম:** `/batch_index [মেসেজ লিংক]`")
     link = message.command[1]
     chat_id, last_id = parse_tg_link(link)
     if not chat_id:
-        return await message.reply("❌ ভুল লিংক!")
+        return await message.reply("❌ ভুল লিংক! লাস্ট মেসেজের লিংক দিন।")
+
     status = await message.reply(f"🔍 ইনডেক্সিং শুরু হচ্ছে...")
     count = 0
     for i in range(1, last_id + 1):
         try:
-            msg = await client.get_messages(chat_id, i)
-            if msg and (msg.video or msg.document or msg.audio):
-                exists = await files_col.find_one({"msg_id": msg.id, "chat_id": chat_id})
-                if not exists:
-                    await files_col.insert_one({"msg_id": msg.id, "chat_id": chat_id, "added_at": datetime.now()})
-                    count += 1
+            # মেসেজটি FILE_CHANNEL-এ কপি করা
+            msg = await client.copy_message(chat_id=FILE_CHANNEL, from_chat_id=chat_id, message_id=i)
+            if msg.video or msg.document or msg.audio:
+                await files_col.insert_one({"msg_id": msg.id, "chat_id": FILE_CHANNEL, "added_at": datetime.now()})
+                count += 1
             if i % 25 == 0: await status.edit(f"⏳ প্রসেসিং চলছে... সেভ হয়েছে: {count}")
+            await asyncio.sleep(0.5)
         except: continue
-    await status.edit(f"✅ সম্পন্ন! সোর্স চ্যানেল `{chat_id}` থেকে মোট সেভ হয়েছে: `{count}` টি।")
+    await status.edit(f"✅ সম্পন্ন! মোট সেভ হয়েছে: `{count}` টি।")
 
 @app.on_message(filters.command("cleardata") & filters.user(ADMIN_ID))
 async def cleardata_admin(client, message):
     try:
         await files_col.delete_many({})
+        # ইনডেক্সগুলো রিসেট করা
         await users_col.update_many({}, {"$set": {"p_index": 0, "f_index": 0, "custom_indexes": {}}})
         await message.reply("✅ ডাটাবেস সম্পূর্ণ ক্লিয়ার করা হয়েছে।")
     except Exception as e:
@@ -508,22 +514,16 @@ async def set_fwd_admin(client, message):
         await message.reply(f"✅ অ্যান্টি-ফরোয়ার্ড {status} হয়েছে।")
     except: await message.reply("নিয়ম: `/set_forward on/off`")
 
-# ==================== ৭. স্মার্ট অটো সেভ হ্যান্ডলার ====================
+# ==================== ৭. স্মার্ট অটো সেভ হ্যান্ডলার (সংশোধিত) ====================
 
-@app.on_message((filters.video | filters.document | filters.audio))
+@app.on_message((filters.chat(FILE_CHANNEL) | filters.chat(-10012345678)) & (filters.video | filters.document | filters.audio)) # উদাহরণ আইডি
 async def auto_save_handler(client, message):
+    # চ্যানেল আইডি অনুযায়ী ফাইল সেভ করা
     chat_id = message.chat.id
     if message.text and message.text.startswith("/"):
         return
-    
-    # চেক করবে এটা কি মেইন ফাইল চ্যানেল নাকি কোনো কাস্টম যুক্ত চ্যানেল
-    is_custom = await custom_cmds_col.find_one({"chat_id": chat_id})
-    
-    if chat_id == FILE_CHANNEL or is_custom:
-        exists = await files_col.find_one({"msg_id": message.id, "chat_id": chat_id})
-        if not exists:
-            await files_col.insert_one({"msg_id": message.id, "chat_id": chat_id, "added_at": datetime.now()})
-            await client.send_message(LOG_CHANNEL, f"✅ নতুন ফাইল সেভ হয়েছে!\nচ্যানেল: `{chat_id}`\nID: `{message.id}`")
+    await files_col.insert_one({"msg_id": message.id, "chat_id": chat_id, "added_at": datetime.now()})
+    await client.send_message(LOG_CHANNEL, f"✅ নতুন ফাইল সেভ হয়েছে! চ্যানেল: `{chat_id}` ID: `{message.id}`")
 
 # ==================== ৮. রান কমান্ডস ও ওয়েব সার্ভার ====================
 
