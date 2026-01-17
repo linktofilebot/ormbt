@@ -97,12 +97,14 @@ async def send_log(text):
 
 # ==================== ৪. কোর ফাইল ডেলিভারি লজিক ====================
 
-async def send_files_logic(client, message, cmd_name, is_extra=False):
+async def send_files_logic(client, message, cmd_name, is_extra=False, already_verified=False):
     user_id = message.from_user.id if hasattr(message, 'from_user') else message.chat.id
     
     # ব্যান চেক
     if await banned_users.find_one({"user_id": user_id}):
-        return await (message.reply("🚫 আপনি ব্যান!") if hasattr(message, 'reply') else message.message.reply("🚫 আপনি ব্যান!"))
+        msg_text = "🚫 আপনি ব্যান!"
+        if hasattr(message, 'reply'): return await message.reply(msg_text)
+        else: return await message.message.reply(msg_text)
 
     if is_extra:
         chat_id_data = await settings_col.find_one({"id": "extra_channel"})
@@ -126,15 +128,16 @@ async def send_files_logic(client, message, cmd_name, is_extra=False):
     current_idx = indices.get(db_cmd_key, 0)
     limit_val = await get_settings("video_limit", "count", 2)
 
-    # প্রিমিয়াম ইউজার অথবা সর্টেনার অফ থাকলে সরাসরি ফাইল
-    if is_prem or not shortener_status:
+    # প্রিমিয়াম ইউজার অথবা সর্টেনার অফ থাকলে অথবা ইতিমধ্যে ভেরিফাইড হলে ফাইল পাঠাবে
+    if is_prem or not shortener_status or already_verified:
         files = await files_col.find({"chat_id": chat_id}).sort("msg_id", 1).skip(current_idx).limit(limit_val).to_list(limit_val)
         
         if not files:
             indices[db_cmd_key] = 0
             await users_col.update_one({"user_id": user_id}, {"$set": {"indices": indices}}, upsert=True)
             text = "✅ এই ক্যাটাগরির সব ফাইল দেখা শেষ! আবার শুরু থেকে দেখতে কমান্ডটি দিন।"
-            return await (message.reply(text) if hasattr(message, 'reply') else message.message.reply(text))
+            if hasattr(message, 'reply'): return await message.reply(text)
+            else: return await message.message.reply(text)
         
         timer_sec = await get_settings("auto_delete", "seconds")
         protect = await get_settings("forward_setting", "protect", False)
@@ -363,8 +366,9 @@ async def start_handler(client, message):
 
     if len(message.command) > 1 and message.command[1].startswith("verify_"):
         v_type = message.command[1].replace("verify_", "")
-        if v_type == "extra": return await send_files_logic(client, message, "", is_extra=True)
-        else: return await send_files_logic(client, message, v_type)
+        # ভেরিফাই করার পর 'already_verified=True' দিয়ে কল করা হয়েছে
+        if v_type == "extra": return await send_files_logic(client, message, "", is_extra=True, already_verified=True)
+        else: return await send_files_logic(client, message, v_type, already_verified=True)
 
     is_prem, status = await check_premium(user_id)
     btn = InlineKeyboardMarkup([
