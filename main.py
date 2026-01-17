@@ -12,6 +12,7 @@ from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import UpdateOne
 
 # ==================== ১. কনফিগারেশন ====================
 API_ID = 29904834                 
@@ -33,7 +34,7 @@ channels_col = db["channels"]
 settings_col = db["settings"]
 plans_col = db["plans"]
 banned_users = db["banned_users"]
-redeem_codes_col = db["redeem_codes"] # নতুন কালেকশন
+redeem_codes_col = db["redeem_codes"]
 
 app = Client("file_store_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -98,7 +99,7 @@ async def send_log(text):
 # ==================== ৪. কোর ফাইল ডেলিভারি লজিক ====================
 
 async def send_files_logic(client, message, cmd_name, is_extra=False, already_verified=False):
-    user_id = message.from_user.id if hasattr(message, 'from_user') else message.chat.id
+    user_id = message.from_user.id if hasattr(message, 'from_user') and message.from_user else message.chat.id
     
     if await banned_users.find_one({"user_id": user_id}):
         msg_text = "🚫 আপনি ব্যান!"
@@ -115,7 +116,8 @@ async def send_files_logic(client, message, cmd_name, is_extra=False, already_ve
     else:
         channel_data = await channels_col.find_one({"command": cmd_name})
         if not channel_data:
-            return await message.reply(f"❌ `{cmd_name}` কমান্ডটি বর্তমানে ডাটাবেসে নেই।")
+            msg = f"❌ `{cmd_name}` কমান্ডটি বর্তমানে ডাটাবেসে নেই।"
+            return await (message.reply(msg) if hasattr(message, 'reply') else message.message.reply(msg))
         chat_id = channel_data["chat_id"]
         db_cmd_key = cmd_name
 
@@ -145,6 +147,9 @@ async def send_files_logic(client, message, cmd_name, is_extra=False, already_ve
                 sent = await client.copy_message(user_id, f["chat_id"], f["msg_id"], protect_content=protect)
                 if sent and timer_sec:
                     asyncio.create_task(auto_delete_msg(user_id, sent.id, timer_sec))
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+                sent = await client.copy_message(user_id, f["chat_id"], f["msg_id"], protect_content=protect)
             except: continue
         
         indices[db_cmd_key] = current_idx + len(files)
@@ -188,14 +193,34 @@ async def add_cnl_handler(client, message):
         c_id, cmd = int(message.command[1]), message.command[2].lower()
         chat = await client.get_chat(c_id)
         await channels_col.update_one({"command": cmd}, {"$set": {"chat_id": c_id, "title": chat.title, "command": cmd}}, upsert=True)
-        st = await message.reply(f"✅ `{chat.title}` লিঙ্কড। ইন্ডেক্সিং হচ্ছে...")
+        st = await message.reply(f"✅ `{chat.title}` লিঙ্কড। দ্রুত ইন্ডেক্সিং হচ্ছে...")
+        
+        batch = []
         count = 0
         async for m in client.get_chat_history(c_id):
             if m.video or m.document or m.audio:
-                await files_col.update_one({"chat_id": c_id, "msg_id": m.id}, {"$set": {"chat_id": c_id, "msg_id": m.id}}, upsert=True)
+                batch.append(UpdateOne({"chat_id": c_id, "msg_id": m.id}, {"$set": {"chat_id": c_id, "msg_id": m.id}}, upsert=True))
                 count += 1
-        await st.edit(f"✅ সম্পন্ন! মোট `{count}` টি ফাইল `{cmd}` কমান্ডে সেভ হয়েছে।")
+                if len(batch) >= 500: # ৫শ করে ফাইল একসাথে সেভ হবে গতি বাড়াতে
+                    await files_col.bulk_write(batch)
+                    batch = []
+        if batch: await files_col.bulk_write(batch)
+        await st.edit(f"✅ সম্পন্ন! মোট `{count}` টি ফাইল `{cmd}` কমান্ডে সেভ হয়েছে। এখন এটি স্টার্ট মেনুতে দেখাবে।")
     except Exception as e: await message.reply(f"এরর: {e}")
+
+@app.on_message(filters.command("delcnl") & filters.user(ADMIN_ID))
+async def del_cnl_command_handler(client, message):
+    if len(message.command) < 2: return await message.reply("📝 উদা: `/delcnl movies` (কমান্ডের নাম দিন)")
+    cmd = message.command[1].lower()
+    exists = await channels_col.find_one({"command": cmd})
+    if exists:
+        c_id = exists["chat_id"]
+        await channels_col.delete_one({"command": cmd})
+        # ওই কমান্ডের সব ফাইল ডাটাবেস থেকে ডিলিট করতে চাইলে নিচের লাইনটি আনকমেন্ট করুন
+        # await files_col.delete_many({"chat_id": c_id})
+        await message.reply(f"✅ `{cmd}` কমান্ডটি ডাটাবেস থেকে রিমুভ করা হয়েছে।")
+    else:
+        await message.reply(f"❌ `{cmd}` নামে কোনো কমান্ড ডাটাবেসে নেই।")
 
 @app.on_message(filters.command("deleteall") & filters.user(ADMIN_ID))
 async def delete_all_handler(client, message):
@@ -222,11 +247,16 @@ async def ext_file_handler(client, message):
         chat = await client.get_chat(c_id)
         await settings_col.update_one({"id": "extra_channel"}, {"$set": {"chat_id": c_id, "title": chat.title}}, upsert=True)
         st = await message.reply(f"🚀 গেট ফাইল চ্যানেল সেট: `{chat.title}`। ইন্ডেক্সিং...")
+        batch = []
         count = 0
         async for m in client.get_chat_history(c_id):
             if m.video or m.document or m.audio:
-                await files_col.update_one({"chat_id": c_id, "msg_id": m.id}, {"$set": {"chat_id": c_id, "msg_id": m.id}}, upsert=True)
+                batch.append(UpdateOne({"chat_id": c_id, "msg_id": m.id}, {"$set": {"chat_id": c_id, "msg_id": m.id}}, upsert=True))
                 count += 1
+                if len(batch) >= 500:
+                    await files_col.bulk_write(batch)
+                    batch = []
+        if batch: await files_col.bulk_write(batch)
         await st.edit(f"✅ সম্পন্ন! গেট ফাইল চ্যানেলে `{count}` ফাইল সেভ হয়েছে।")
     except Exception as e: await message.reply(f"এরর: {e}")
 
@@ -343,7 +373,7 @@ async def broadcast_handler(client, message):
         try:
             await message.reply_to_message.copy(u["user_id"])
             done += 1
-        except FloodWait as e: await asyncio.sleep(e.x); await message.reply_to_message.copy(u["user_id"]); done += 1
+        except FloodWait as e: await asyncio.sleep(e.value); await message.reply_to_message.copy(u["user_id"]); done += 1
         except: fail += 1
     await st.edit(f"✅ ব্রডকাস্ট সম্পন্ন!\nসফল: {done}\nব্যর্থ: {fail}")
 
@@ -375,7 +405,6 @@ async def redeem_code_handler(client, message):
     user = await users_col.find_one({"user_id": user_id})
     current_expiry = (user.get("expiry_date") if user else None)
     
-    # প্রিমিয়াম এক্সটেনশন লজিক
     now = datetime.now()
     if current_expiry and current_expiry > now:
         new_expiry = current_expiry + duration
@@ -388,7 +417,6 @@ async def redeem_code_handler(client, message):
         upsert=True
     )
     
-    # কোড ডিলিট করে দেওয়া (একবার ব্যবহারের জন্য)
     await redeem_codes_col.delete_one({"code": code_str})
     
     await message.reply(f"🎉 **অভিনন্দন! প্রিমিয়াম এক্টিভেট হয়েছে।**\nমেয়াদ: `{dur_str}`\nনতুন শেষ তারিখ: `{new_expiry.strftime('%Y-%m-%d %H:%M')}`")
@@ -435,17 +463,33 @@ async def start_handler(client, message):
         else: return await send_files_logic(client, message, v_type, already_verified=True)
 
     is_prem, status = await check_premium(user_id)
-    btn = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📂 Get Files", callback_data="get_extra_files")],
-        [InlineKeyboardButton("💎 Plans", callback_data="show_plans"), InlineKeyboardButton("Owner 👑", url=f"https://t.me/{OWNER_USERNAME}")]
-    ])
-    await message.reply_text(f"👋 আসসালামু আলাইকুম {message.from_user.first_name}!\n🆔 আইডি: `{user_id}`\n💎 মেম্বারশিপ: `{status}`\n\nফাইল পেতে নিচের বাটনে ক্লিক করুন অথবা কাস্টম কমান্ড ব্যবহার করুন।", reply_markup=btn)
+    
+    # ডাইনামিক বাটন জেনারেটর
+    all_cmds = await channels_col.find().to_list(None)
+    buttons = []
+    
+    # অ্যাড করা চ্যানেলগুলোর বাটন জোড়ায় জোড়ায় সাজানো
+    for i in range(0, len(all_cmds), 2):
+        row = [InlineKeyboardButton(all_cmds[i]["title"], callback_data=f"getcmd_{all_cmds[i]['command']}")]
+        if i + 1 < len(all_cmds):
+            row.append(InlineKeyboardButton(all_cmds[i+1]["title"], callback_data=f"getcmd_{all_cmds[i+1]['command']}"))
+        buttons.append(row)
+
+    # ডিফল্ট বাটনগুলো নিচে যোগ করা
+    buttons.append([InlineKeyboardButton("📂 Get Files", callback_data="get_extra_files")])
+    buttons.append([InlineKeyboardButton("💎 Plans", callback_data="show_plans"), InlineKeyboardButton("Owner 👑", url=f"https://t.me/{OWNER_USERNAME}")])
+    
+    btn_markup = InlineKeyboardMarkup(buttons)
+    await message.reply_text(f"👋 আসসালামু আলাইকুম {message.from_user.first_name}!\n🆔 আইডি: `{user_id}`\n💎 মেম্বারশিপ: `{status}`\n\nফাইল পেতে নিচের বাটনে ক্লিক করুন অথবা কাস্টম কমান্ড ব্যবহার করুন।", reply_markup=btn_markup)
 
 @app.on_callback_query()
 async def cb_handler(client, query: CallbackQuery):
     user_id = query.from_user.id
     if query.data == "get_extra_files":
         await send_files_logic(client, query, "", is_extra=True)
+    elif query.data.startswith("getcmd_"):
+        cmd_name = query.data.replace("getcmd_", "")
+        await send_files_logic(client, query, cmd_name)
     elif query.data == "show_plans":
         plans = await plans_col.find().to_list(None)
         txt = "💎 **আমাদের প্রিমিয়াম প্ল্যানসমূহ:**\n\n"
@@ -456,10 +500,18 @@ async def cb_handler(client, query: CallbackQuery):
         await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back_home")]]))
     elif query.data == "back_home":
         _, st = await check_premium(user_id)
-        await query.message.edit_text(f"স্বাগতম!\n💎 মেম্বারশিপ: {st}", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📂 Get Files", callback_data="get_extra_files")],
-            [InlineKeyboardButton("💎 Plans", callback_data="show_plans")]
-        ]))
+        # ব্যাক বাটনের জন্য পুনরায় ডাইনামিক বাটন লোড
+        all_cmds = await channels_col.find().to_list(None)
+        buttons = []
+        for i in range(0, len(all_cmds), 2):
+            row = [InlineKeyboardButton(all_cmds[i]["title"], callback_data=f"getcmd_{all_cmds[i]['command']}")]
+            if i + 1 < len(all_cmds):
+                row.append(InlineKeyboardButton(all_cmds[i+1]["title"], callback_data=f"getcmd_{all_cmds[i+1]['command']}"))
+            buttons.append(row)
+        buttons.append([InlineKeyboardButton("📂 Get Files", callback_data="get_extra_files")])
+        buttons.append([InlineKeyboardButton("💎 Plans", callback_data="show_plans")])
+        
+        await query.message.edit_text(f"স্বাগতম!\n💎 মেম্বারশিপ: {st}", reply_markup=InlineKeyboardMarkup(buttons))
     await query.answer()
 
 @app.on_message(filters.command("getfile") & filters.private)
@@ -471,7 +523,7 @@ async def custom_detector(client, message):
     if not message.text.startswith("/"): return
     cmd = message.text.split()[0].replace("/", "").lower()
     
-    sys_cmds = ["start", "stats", "premium_list", "remove_premium", "add_premium", "addcnl", "extfile", "getfile", 
+    sys_cmds = ["start", "stats", "premium_list", "remove_premium", "add_premium", "addcnl", "delcnl", "extfile", "getfile", 
                 "set_timer", "set_limit", "set_shortener", "add_plan", "del_plan", "broadcast", "ban", "unban", "set_log", "set_protect", 
                 "deleteall", "skip", "shortener", "plans", "addredeem", "redeem"]
     if cmd in sys_cmds: return
