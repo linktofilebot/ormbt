@@ -219,6 +219,16 @@ async def add_plan_handler(client, message):
     await plans_col.update_one({"name": name}, {"$set": {"name": name, "price": price}}, upsert=True)
     await message.reply(f"✅ প্রিমিয়াম প্ল্যান অ্যাড হয়েছে: `{name}` - `{price}`")
 
+@app.on_message(filters.command("del_plan") & filters.user(ADMIN_ID))
+async def del_plan_handler(client, message):
+    if len(message.command) < 2: return await message.reply("📝 উদা: `/del_plan 30Days` (প্ল্যানের নাম দিন)")
+    name = message.command[1]
+    res = await plans_col.delete_one({"name": name})
+    if res.deleted_count > 0:
+        await message.reply(f"✅ প্রিমিয়াম প্ল্যান `{name}` ডিলিট করা হয়েছে।")
+    else:
+        await message.reply(f"❌ `{name}` নামে কোনো প্ল্যান ডাটাবেসে পাওয়া যায়নি।")
+
 @app.on_message(filters.command("add_premium") & filters.user(ADMIN_ID))
 async def add_prem_handler(client, message):
     try:
@@ -409,7 +419,7 @@ async def custom_detector(client, message):
     
     # সিস্টেম কমান্ডগুলো এভয়েড করা
     sys_cmds = ["start", "stats", "premium_list", "remove_premium", "add_premium", "addcnl", "extfile", "getfile", 
-                "set_timer", "set_limit", "set_shortener", "add_plan", "broadcast", "ban", "unban", "set_log", "set_protect", 
+                "set_timer", "set_limit", "set_shortener", "add_plan", "del_plan", "broadcast", "ban", "unban", "set_log", "set_protect", 
                 "deleteall", "skip", "shortener", "plans"]
     if cmd in sys_cmds: return
     
