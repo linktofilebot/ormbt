@@ -70,6 +70,10 @@ async def check_premium(user_id):
     return False, "ফ্রী মেম্বার"
 
 async def get_shortlink(url):
+    # সর্টেনার স্ট্যাটাস চেক
+    is_active = await get_settings("shortener", "status", True)
+    if not is_active: return url
+
     s_url = await get_settings("shortener", "base_url")
     s_key = await get_settings("shortener", "api_key")
     if not s_url or not s_key: return url
@@ -98,13 +102,14 @@ async def send_files_logic(client, message, cmd_name, is_extra=False):
     
     # ব্যান চেক
     if await banned_users.find_one({"user_id": user_id}):
-        return await (message.reply("🚫 আপনি এই বট থেকে ব্যান!") if hasattr(message, 'reply') else message.message.reply("🚫 আপনি ব্যান!"))
+        return await (message.reply("🚫 আপনি ব্যান!") if hasattr(message, 'reply') else message.message.reply("🚫 আপনি ব্যান!"))
 
     if is_extra:
-        chat_id = await get_settings("extra_channel", "chat_id")
-        if not chat_id:
-            msg = "❌ গেট ফাইল চ্যানেল সেট করা নেই। অ্যাডমিনকে `/extfile` ব্যবহার করতে বলুন।"
+        chat_id_data = await settings_col.find_one({"id": "extra_channel"})
+        if not chat_id_data:
+            msg = "❌ গেট ফাইল চ্যানেল সেট করা নেই।"
             return await (message.reply(msg) if hasattr(message, 'reply') else message.message.reply(msg))
+        chat_id = chat_id_data["chat_id"]
         db_cmd_key = "extra_files_global"
     else:
         channel_data = await channels_col.find_one({"command": cmd_name})
@@ -114,13 +119,15 @@ async def send_files_logic(client, message, cmd_name, is_extra=False):
         db_cmd_key = cmd_name
 
     is_prem, _ = await check_premium(user_id)
+    shortener_status = await get_settings("shortener", "status", True)
+    
     user_data = await users_col.find_one({"user_id": user_id}) or {}
     indices = user_data.get("indices", {})
     current_idx = indices.get(db_cmd_key, 0)
     limit_val = await get_settings("video_limit", "count", 2)
 
-    if is_prem:
-        # শুধুমাত্র নির্দিষ্ট Chat ID এর ফাইলগুলো আসবে
+    # প্রিমিয়াম ইউজার অথবা সর্টেনার অফ থাকলে সরাসরি ফাইল
+    if is_prem or not shortener_status:
         files = await files_col.find({"chat_id": chat_id}).sort("msg_id", 1).skip(current_idx).limit(limit_val).to_list(limit_val)
         
         if not files:
@@ -151,7 +158,7 @@ async def send_files_logic(client, message, cmd_name, is_extra=False):
         if hasattr(message, 'reply'): await message.reply(text, reply_markup=btn)
         else: await message.message.reply(text, reply_markup=btn)
 
-# ==================== ৫. অ্যাডমিন ম্যানেজমেন্ট কমান্ডসমূহ (বিশাল প্যানেল) ====================
+# ==================== ৫. অ্যাডমিন ম্যানেজমেন্ট কমান্ডসমূহ ====================
 
 @app.on_message(filters.command("addcnl") & filters.user(ADMIN_ID))
 async def add_cnl_handler(client, message):
@@ -167,8 +174,24 @@ async def add_cnl_handler(client, message):
                 await files_col.update_one({"chat_id": c_id, "msg_id": m.id}, {"$set": {"chat_id": c_id, "msg_id": m.id}}, upsert=True)
                 count += 1
         await st.edit(f"✅ সম্পন্ন! মোট `{count}` টি ফাইল `{cmd}` কমান্ডে সেভ হয়েছে।")
-        await send_log(f"📥 **নতুন চ্যানেল অ্যাড:**\nচ্যানেল: {chat.title}\nকমান্ড: /{cmd}\nফাইল: {count}")
     except Exception as e: await message.reply(f"এরর: {e}")
+
+@app.on_message(filters.command("deleteall") & filters.user(ADMIN_ID))
+async def delete_all_handler(client, message):
+    if len(message.command) < 2: return await message.reply("📝 উদা: `/deleteall -100xxxx` (চ্যানেল আইডি দিন)")
+    try:
+        c_id = int(message.command[1])
+        res = await files_col.delete_many({"chat_id": c_id})
+        await channels_col.delete_one({"chat_id": c_id})
+        await message.reply(f"✅ সম্পন্ন! চ্যানেল `{c_id}` এর মোট `{res.deleted_count}` টি ফাইল ডাটাবেস থেকে রিমুভ করা হয়েছে।")
+    except Exception as e: await message.reply(f"এরর: {e}")
+
+@app.on_message(filters.command("shortener") & filters.user(ADMIN_ID))
+async def shortener_toggle_cmd(client, message):
+    if len(message.command) < 2: return await message.reply("📝 `/shortener on` অথবা `/shortener off` output")
+    status = message.command[1].lower() == "on"
+    await settings_col.update_one({"id": "shortener"}, {"$set": {"status": status}}, upsert=True)
+    await message.reply(f"✅ সর্টেনার লিঙ্ক এখন **{'চালু (ON)' if status else 'বন্ধ (OFF)'}** করা হয়েছে।")
 
 @app.on_message(filters.command("extfile") & filters.user(ADMIN_ID))
 async def ext_file_handler(client, message):
@@ -185,6 +208,13 @@ async def ext_file_handler(client, message):
                 count += 1
         await st.edit(f"✅ সম্পন্ন! গেট ফাইল চ্যানেলে `{count}` ফাইল সেভ হয়েছে।")
     except Exception as e: await message.reply(f"এরর: {e}")
+
+@app.on_message(filters.command("add_plan") & filters.user(ADMIN_ID))
+async def add_plan_handler(client, message):
+    if len(message.command) < 3: return await message.reply("📝 উদা: `/add_plan 30Days 100Tk` (স্পেস দিন)")
+    name, price = message.command[1], message.command[2]
+    await plans_col.update_one({"name": name}, {"$set": {"name": name, "price": price}}, upsert=True)
+    await message.reply(f"✅ প্রিমিয়াম প্ল্যান অ্যাড হয়েছে: `{name}` - `{price}`")
 
 @app.on_message(filters.command("add_premium") & filters.user(ADMIN_ID))
 async def add_prem_handler(client, message):
@@ -237,7 +267,7 @@ async def short_set_handler(client, message):
     try:
         url, key = message.command[1], message.command[2]
         await settings_col.update_one({"id": "shortener"}, {"$set": {"base_url": url, "api_key": key}}, upsert=True)
-        await message.reply("✅ সর্টেনার সেট হয়েছে।")
+        await message.reply("✅ সর্টেনার কনফিগারেশন সেট হয়েছে।")
     except: await message.reply("📝 `/set_shortener domain.com key`")
 
 @app.on_message(filters.command("set_log") & filters.user(ADMIN_ID))
@@ -296,13 +326,39 @@ async def stats_handler(client, message):
 
 # ==================== ৬. ইউজার হ্যান্ডলার ও কমান্ডস ====================
 
+@app.on_message(filters.command("plans") & filters.private)
+async def plans_command_handler(client, message):
+    plans = await plans_col.find().to_list(None)
+    txt = "💎 **আমাদের প্রিমিয়াম প্ল্যানসমূহ:**\n\n"
+    if not plans:
+        txt += "🔹 বর্তমানে কোনো প্ল্যান অ্যাড করা নেই।\n"
+    else:
+        for p in plans: txt += f"🔹 {p['name']} - {p['price']}\n"
+    txt += f"\n✅ সুবিধা: সরাসরি ফাইল পাবেন, কোনো ভেরিফিকেশন লাগবে না।\n💬 যোগাযোগ: @{OWNER_USERNAME}"
+    await message.reply(txt)
+
+@app.on_message(filters.command("skip") & filters.private)
+async def skip_handler(client, message):
+    if len(message.command) < 3: 
+        return await message.reply("📝 উদা: `/skip movies 100` (মুভি কমান্ডের ১০০টি ফাইল স্কিপ করতে)\n`/skip movies 0` (আবার প্রথম থেকে শুরু হবে)")
+    
+    cmd = message.command[1].lower()
+    try: num = int(message.command[2])
+    except: return await message.reply("❌ সংখ্যাটি সঠিক নয়।")
+
+    user_id = message.from_user.id
+    db_key = "extra_files_global" if cmd in ["extra", "getfile"] else cmd
+
+    await users_col.update_one({"user_id": user_id}, {"$set": {f"indices.{db_key}": num}}, upsert=True)
+    if num == 0:
+        await message.reply(f"✅ `{cmd}` কমান্ড এখন শুরু (০) থেকে ফাইল দেওয়া শুরু করবে।")
+    else:
+        await message.reply(f"✅ `{cmd}` কমান্ডের ইন্ডেক্স `{num}` এ সেট হয়েছে।")
+
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     user_id = message.from_user.id
-    # ব্যান চেক
     if await banned_users.find_one({"user_id": user_id}): return
-    
-    # নতুন ইউজার সেভ
     await users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id}}, upsert=True)
 
     if len(message.command) > 1 and message.command[1].startswith("verify_"):
@@ -315,7 +371,7 @@ async def start_handler(client, message):
         [InlineKeyboardButton("📂 Get Files", callback_data="get_extra_files")],
         [InlineKeyboardButton("💎 Plans", callback_data="show_plans"), InlineKeyboardButton("Owner 👑", url=f"https://t.me/{OWNER_USERNAME}")]
     ])
-    await message.reply_text(f"👋 আসসালামু আলাইকুম {message.from_user.first_name}!\n🆔 আইডি: `{user_id}`\n💎 মেম্বারশিপ: `{status}`\n\nভিডিও পেতে নিচের বাটনে ক্লিক করুন অথবা কাস্টম কমান্ড ব্যবহার করুন।", reply_markup=btn)
+    await message.reply_text(f"👋 আসসালামু আলাইকুম {message.from_user.first_name}!\n🆔 আইডি: `{user_id}`\n💎 মেম্বারশিপ: `{status}`\n\nফাইল পেতে নিচের বাটনে ক্লিক করুন অথবা কাস্টম কমান্ড ব্যবহার করুন।", reply_markup=btn)
 
 @app.on_callback_query()
 async def cb_handler(client, query: CallbackQuery):
@@ -325,10 +381,10 @@ async def cb_handler(client, query: CallbackQuery):
     elif query.data == "show_plans":
         plans = await plans_col.find().to_list(None)
         txt = "💎 **আমাদের প্রিমিয়াম প্ল্যানসমূহ:**\n\n"
-        if not plans: txt += "🔹 ৩০ দিন - ১০০ টাকা (যোগাযোগ করুন)\n"
+        if not plans: txt += "🔹 বর্তমানে কোনো প্ল্যান নেই।\n"
         else:
             for p in plans: txt += f"🔹 {p['name']} - {p['price']}\n"
-        txt += f"\n✅ সুবিধা: সরাসরি ফাইল পাবেন, ভেরিফিকেশন লাগবে না।\n💬 যোগাযোগ: @{OWNER_USERNAME}"
+        txt += f"\n✅ সুবিধা: সরাসরি ফাইল পাবেন।\n💬 যোগাযোগ: @{OWNER_USERNAME}"
         await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back_home")]]))
     elif query.data == "back_home":
         _, st = await check_premium(user_id)
@@ -349,7 +405,8 @@ async def custom_detector(client, message):
     
     # সিস্টেম কমান্ডগুলো এভয়েড করা
     sys_cmds = ["start", "stats", "premium_list", "remove_premium", "add_premium", "addcnl", "extfile", "getfile", 
-                "set_timer", "set_limit", "set_shortener", "add_plan", "broadcast", "ban", "unban", "set_log", "set_protect"]
+                "set_timer", "set_limit", "set_shortener", "add_plan", "broadcast", "ban", "unban", "set_log", "set_protect", 
+                "deleteall", "skip", "shortener", "plans"]
     if cmd in sys_cmds: return
     
     exists = await channels_col.find_one({"command": cmd})
@@ -357,13 +414,11 @@ async def custom_detector(client, message):
 
 @app.on_message((filters.video | filters.document | filters.audio) & ~filters.private)
 async def auto_save(client, message):
-    # চ্যানেল মনিটরিং: যদি এটি আমাদের ডাটাবেসে থাকে তবে অটো সেভ হবে
     chat_id = message.chat.id
     is_saved = await channels_col.find_one({"chat_id": chat_id})
     extra = await settings_col.find_one({"id": "extra_channel", "chat_id": chat_id})
     if is_saved or extra:
         await files_col.update_one({"chat_id": chat_id, "msg_id": message.id}, {"$set": {"chat_id": chat_id, "msg_id": message.id}}, upsert=True)
-        # লগ পাঠানো
         await send_log(f"📥 **নতুন ফাইল সেভ:**\nচ্যানেল: {message.chat.title}\nID: {message.id}")
 
 # ==================== ৭. ওয়েব সার্ভার ও রান ====================
