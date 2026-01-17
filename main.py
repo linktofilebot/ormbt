@@ -33,6 +33,7 @@ channels_col = db["channels"]
 settings_col = db["settings"]
 plans_col = db["plans"]
 banned_users = db["banned_users"]
+redeem_codes_col = db["redeem_codes"] # নতুন কালেকশন
 
 app = Client("file_store_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -70,7 +71,6 @@ async def check_premium(user_id):
     return False, "ফ্রী মেম্বার"
 
 async def get_shortlink(url):
-    # সর্টেনার স্ট্যাটাস চেক
     is_active = await get_settings("shortener", "status", True)
     if not is_active: return url
 
@@ -100,7 +100,6 @@ async def send_log(text):
 async def send_files_logic(client, message, cmd_name, is_extra=False, already_verified=False):
     user_id = message.from_user.id if hasattr(message, 'from_user') else message.chat.id
     
-    # ব্যান চেক
     if await banned_users.find_one({"user_id": user_id}):
         msg_text = "🚫 আপনি ব্যান!"
         if hasattr(message, 'reply'): return await message.reply(msg_text)
@@ -128,7 +127,6 @@ async def send_files_logic(client, message, cmd_name, is_extra=False, already_ve
     current_idx = indices.get(db_cmd_key, 0)
     limit_val = await get_settings("video_limit", "count", 2)
 
-    # প্রিমিয়াম ইউজার অথবা সর্টেনার অফ থাকলে অথবা ইতিমধ্যে ভেরিফাইড হলে ফাইল পাঠাবে
     if is_prem or not shortener_status or already_verified:
         files = await files_col.find({"chat_id": chat_id}).sort("msg_id", 1).skip(current_idx).limit(limit_val).to_list(limit_val)
         
@@ -152,7 +150,6 @@ async def send_files_logic(client, message, cmd_name, is_extra=False, already_ve
         indices[db_cmd_key] = current_idx + len(files)
         await users_col.update_one({"user_id": user_id}, {"$set": {"indices": indices}}, upsert=True)
     else:
-        # ভেরিফিকেশন লিংক লজিক
         me = await client.get_me()
         v_type = "extra" if is_extra else cmd_name
         v_url = await get_shortlink(f"https://t.me/{me.username}?start=verify_{v_type}")
@@ -162,6 +159,27 @@ async def send_files_logic(client, message, cmd_name, is_extra=False, already_ve
         else: await message.message.reply(text, reply_markup=btn)
 
 # ==================== ৫. অ্যাডমিন ম্যানেজমেন্ট কমান্ডসমূহ ====================
+
+@app.on_message(filters.command("addredeem") & filters.user(ADMIN_ID))
+async def add_redeem_handler(client, message):
+    if len(message.command) < 3:
+        return await message.reply("📝 উদা: `/addredeem 1mo 10` (১ মাসের ১০টি কোড)")
+    
+    dur_str = message.command[1]
+    try: count = int(message.command[2])
+    except: return await message.reply("❌ সংখ্যাটি সঠিক নয়।")
+
+    duration = parse_duration_advanced(dur_str)
+    if not duration: return await message.reply("❌ ভুল সময় ফরম্যাট! (y, mo, w, d, h, m, s)")
+
+    codes = []
+    for _ in range(count):
+        code = "PREM-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
+        await redeem_codes_col.insert_one({"code": code, "duration": dur_str})
+        codes.append(f"`{code}`")
+    
+    code_list = "\n".join(codes)
+    await message.reply(f"✅ **{count} টি রিডিম কোড জেনারেট হয়েছে!**\nসময়: `{dur_str}`\n\n{code_list}")
 
 @app.on_message(filters.command("addcnl") & filters.user(ADMIN_ID))
 async def add_cnl_handler(client, message):
@@ -339,6 +357,43 @@ async def stats_handler(client, message):
 
 # ==================== ৬. ইউজার হ্যান্ডলার ও কমান্ডস ====================
 
+@app.on_message(filters.command("redeem") & filters.private)
+async def redeem_code_handler(client, message):
+    if len(message.command) < 2:
+        return await message.reply("📝 উদা: `/redeem PREM-XXXXXX` (কোড দিন)")
+    
+    code_str = message.command[1].strip()
+    user_id = message.from_user.id
+    
+    db_code = await redeem_codes_col.find_one({"code": code_str})
+    if not db_code:
+        return await message.reply("❌ ভুল বা অবৈধ রিডিম কোড।")
+    
+    dur_str = db_code["duration"]
+    duration = parse_duration_advanced(dur_str)
+    
+    user = await users_col.find_one({"user_id": user_id})
+    current_expiry = (user.get("expiry_date") if user else None)
+    
+    # প্রিমিয়াম এক্সটেনশন লজিক
+    now = datetime.now()
+    if current_expiry and current_expiry > now:
+        new_expiry = current_expiry + duration
+    else:
+        new_expiry = now + duration
+    
+    await users_col.update_one(
+        {"user_id": user_id},
+        {"$set": {"is_premium": True, "expiry_date": new_expiry}},
+        upsert=True
+    )
+    
+    # কোড ডিলিট করে দেওয়া (একবার ব্যবহারের জন্য)
+    await redeem_codes_col.delete_one({"code": code_str})
+    
+    await message.reply(f"🎉 **অভিনন্দন! প্রিমিয়াম এক্টিভেট হয়েছে।**\nমেয়াদ: `{dur_str}`\nনতুন শেষ তারিখ: `{new_expiry.strftime('%Y-%m-%d %H:%M')}`")
+    await send_log(f"🔑 **রিডিম কোড ব্যবহার:**\nইউজার: `{user_id}`\nসময়: `{dur_str}`\nকোড: `{code_str}`")
+
 @app.on_message(filters.command("plans") & filters.private)
 async def plans_command_handler(client, message):
     plans = await plans_col.find().to_list(None)
@@ -376,7 +431,6 @@ async def start_handler(client, message):
 
     if len(message.command) > 1 and message.command[1].startswith("verify_"):
         v_type = message.command[1].replace("verify_", "")
-        # ভেরিফাই করার পর 'already_verified=True' দিয়ে কল করা হয়েছে
         if v_type == "extra": return await send_files_logic(client, message, "", is_extra=True, already_verified=True)
         else: return await send_files_logic(client, message, v_type, already_verified=True)
 
@@ -417,10 +471,9 @@ async def custom_detector(client, message):
     if not message.text.startswith("/"): return
     cmd = message.text.split()[0].replace("/", "").lower()
     
-    # সিস্টেম কমান্ডগুলো এভয়েড করা
     sys_cmds = ["start", "stats", "premium_list", "remove_premium", "add_premium", "addcnl", "extfile", "getfile", 
                 "set_timer", "set_limit", "set_shortener", "add_plan", "del_plan", "broadcast", "ban", "unban", "set_log", "set_protect", 
-                "deleteall", "skip", "shortener", "plans"]
+                "deleteall", "skip", "shortener", "plans", "addredeem", "redeem"]
     if cmd in sys_cmds: return
     
     exists = await channels_col.find_one({"command": cmd})
