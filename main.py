@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 # ==================== ১. কনফিগারেশন ====================
 API_ID = 29904834                 
 API_HASH = "8b4fd9ef578af114502feeafa2d31938"        
-BOT_TOKEN = "8061645932:AAE8HJGB_culcQ-EVtycl2GSrysTPMxTOHM"      
+BOT_TOKEN = "8313292799:AAHxjrKVfbaMTA89fasbJSva-2u55pzraJ4"      
 ADMIN_ID = 7525127704              
 LOG_CHANNEL = -1003513942313       
 FILE_CHANNEL = -1003534917482      
