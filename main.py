@@ -28,13 +28,13 @@ files_col = db["stored_files"]
 plans_col = db["plans"]
 redeem_col = db["redeem_codes"]
 settings_col = db["settings"]
-custom_cmds_col = db["custom_commands"] # নতুন কমান্ড স্টোর করার কালেকশন
+custom_cmds_col = db["custom_commands"] # <--- নতুন যোগ করা হয়েছে (নতুন কমান্ডের জন্য)
 
 app = Client("file_store_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # ==================== ৩. সাহায্যকারী ফাংশনসমূহ (Helpers) ====================
 
-# ভিডিও লিমিট ডাটাবেস থেকে নেওয়ার ফাংশন
+# ভিডিও লিমিট ডাটাবেস থেকে নেওয়ার ফাংশন (নতুন যুক্ত)
 async def get_video_limit():
     data = await settings_col.find_one({"id": "video_limit"})
     return data.get("count", 1) if data else 1
@@ -65,7 +65,9 @@ async def send_premium_report(client, user_id, expiry_date, method="Redeem Code"
             f"🚀 **প্রিমিয়াম মেম্বারশিপ আপডেট**\n\n"
             f"👤 **নাম:** {user.first_name}\n"
             f"🆔 **আইডি:** `{user.id}`\n"
+            f"🔗 **ইউজারনেম:** {username}\n"
             f"⏳ **মেয়াদ:** {readable_time}\n"
+            f"📅 **শেষ হবে:** {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"🛠 **পদ্ধতি:** {method}"
         )
         try:
@@ -117,6 +119,7 @@ async def auto_delete_msg(client, chat_id, message_id, seconds):
         await client.delete_messages(chat_id, message_id)
     except: pass
 
+# লিংক থেকে চ্যানেল আইডি এবং লাস্ট মেসেজ আইডি বের করার ফাংশন
 def parse_tg_link(link):
     regex = r"(?:https?://)?t\.me/(?:c/)?([^/]+)/(\d+)"
     match = re.search(regex, link)
@@ -130,63 +133,7 @@ def parse_tg_link(link):
         return chat_id, last_msg_id
     return None, None
 
-# ==================== ৪. ডাইনামিক ফাইল পাঠানোর মূল ফাংশন (নতুন) ====================
-
-async def process_file_request(client, update, cmd_key, target_chat_id):
-    """এটি প্রিমিয়াম এবং ফ্রি ইউজারদের জন্য ফাইল পাঠানোর মেইন লজিক"""
-    is_cb = isinstance(update, CallbackQuery)
-    user_id = update.from_user.id
-    
-    user_data = await users_col.find_one({"user_id": user_id})
-    if not user_data:
-        await users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id, "is_premium": False, "p_index": 0, "f_index": 0, "custom_indexes": {}}}, upsert=True)
-        user_data = await users_col.find_one({"user_id": user_id})
-
-    is_prem, _ = await check_premium(user_id)
-
-    # ইনডেক্স নির্ধারণ (মেইন চ্যানেলের জন্য আলাদা, কাস্টম কমান্ডের জন্য আলাদা)
-    if cmd_key == "default":
-        index_field = "p_index"
-        current_idx = user_data.get("p_index", 0)
-    else:
-        index_field = f"custom_indexes.{cmd_key}"
-        current_idx = user_data.get("custom_indexes", {}).get(cmd_key, 0)
-
-    if is_prem:
-        limit_val = await get_video_limit()
-        # নির্দিষ্ট চ্যানেলের ফাইল খোঁজা (সংশোধিত ফাইল স্কিমা অনুযায়ী)
-        files = await files_col.find({"chat_id": target_chat_id}).sort("_id", 1).skip(current_idx).limit(limit_val).to_list(limit_val)
-        
-        if not files:
-            await users_col.update_one({"user_id": user_id}, {"$set": {index_field: 0}}) 
-            msg = "সব ফাইল শেষ! আবার প্রথম থেকে শুরু হবে।"
-            if is_cb: await update.message.reply(msg)
-            else: await update.reply(msg)
-            return
-        
-        if is_cb: await update.answer(f"{len(files)}টি ভিডিও পাঠানো হচ্ছে...", show_alert=False)
-        p_on = await is_protect_on()
-        timer_data = await settings_col.find_one({"id": "auto_delete"})
-        
-        for f in files:
-            try:
-                sent_msg = await client.copy_message(user_id, f["chat_id"], f["msg_id"], protect_content=p_on)
-                if sent_msg and timer_data:
-                    asyncio.create_task(auto_delete_msg(client, user_id, sent_msg.id, timer_data["seconds"]))
-            except: pass
-        
-        await users_col.update_one({"user_id": user_id}, {"$inc": {index_field: len(files)}})
-
-    else:
-        me = await client.get_me()
-        verify_url = f"https://t.me/{me.username}?start=verify_{user_id}"
-        short_link = await get_shortlink(verify_url)
-        txt = "🚫 **ভেরিফিকেশন বাধ্যতামূলক!**\n\nফাইল পেতে নিচের লিংকে ক্লিক করে ভেরিফাই করুন। প্রিমিয়াম মেম্বার হলে সরাসরি ভিডিও পাবেন।"
-        btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 ভেরিফাই লিংক", url=short_link)]])
-        if is_cb: await update.message.reply(txt, reply_markup=btn); await update.answer()
-        else: await update.reply(txt, reply_markup=btn)
-
-# ==================== ৫. ইউজার কমান্ড হ্যান্ডলার ====================
+# ==================== ৪. ইউজার কমান্ড হ্যান্ডলার ====================
 
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message):
@@ -196,9 +143,11 @@ async def start_cmd(client, message):
 
     user_data = await users_col.find_one({"user_id": user_id})
     if not user_data:
-        await users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id, "is_premium": False, "p_index": 0, "f_index": 0, "custom_indexes": {}}}, upsert=True)
+        await users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id, "is_premium": False, "p_index": 0, "f_index": 0}}, upsert=True)
 
+    # ভেরিফিকেশন লিংক দিয়ে আসলে (Deep Linking)
     if len(message.command) > 1 and message.command[1].startswith("verify"):
+        # ভেরিফিকেশন হ্যান্ডলিং (মেইন ফাইল চ্যানেল)
         is_prem, _ = await check_premium(user_id)
         if is_prem: return await message.reply("আপনি ইতিমধ্যে প্রিমিয়াম মেম্বার। ফাইল পেতে সরাসরি গেট ফাইল বাটনে ক্লিক করুন।")
         
@@ -206,8 +155,7 @@ async def start_cmd(client, message):
         f_idx = user_data.get("f_index", 0)
         
         limit_val = await get_video_limit()
-        # মেইন চ্যানেলের ফাইল খোঁজা
-        files = await files_col.find({"chat_id": FILE_CHANNEL}).sort("_id", 1).skip(f_idx).limit(limit_val).to_list(limit_val)
+        files = await files_col.find().sort("_id", 1).skip(f_idx).limit(limit_val).to_list(limit_val)
         
         if not files:
             await users_col.update_one({"user_id": user_id}, {"$set": {"f_index": 0}}) 
@@ -241,8 +189,49 @@ async def start_cmd(client, message):
 @app.on_callback_query(filters.regex("get_file_logic"))
 @app.on_message(filters.command("getfile"))
 async def getfile_handler(client, update):
-    # মেইন চ্যানেলের জন্য default কি ব্যবহার করা হয়েছে
-    await process_file_request(client, update, "default", FILE_CHANNEL)
+    is_cb = isinstance(update, CallbackQuery)
+    user_id = update.from_user.id
+    
+    user_data = await users_col.find_one({"user_id": user_id})
+    if not user_data:
+        await users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id, "is_premium": False, "p_index": 0, "f_index": 0}}, upsert=True)
+        user_data = await users_col.find_one({"user_id": user_id})
+
+    is_prem, _ = await check_premium(user_id)
+
+    if is_prem:
+        p_idx = user_data.get("p_index", 0)
+        limit_val = await get_video_limit()
+        files = await files_col.find().sort("_id", 1).skip(p_idx).limit(limit_val).to_list(limit_val)
+        
+        if not files:
+            await users_col.update_one({"user_id": user_id}, {"$set": {"p_index": 0}}) 
+            msg = "সব ফাইল শেষ! আবার প্রথম থেকে শুরু হবে।"
+            if is_cb: await update.message.reply(msg)
+            else: await update.reply(msg)
+            return
+        
+        if is_cb: await update.answer(f"{len(files)}টি ভিডিও পাঠানো হচ্ছে...", show_alert=False)
+        p_on = await is_protect_on()
+        timer_data = await settings_col.find_one({"id": "auto_delete"})
+        
+        for f in files:
+            try:
+                sent_msg = await client.copy_message(user_id, FILE_CHANNEL, f["msg_id"], protect_content=p_on)
+                if sent_msg and timer_data:
+                    asyncio.create_task(auto_delete_msg(client, user_id, sent_msg.id, timer_data["seconds"]))
+            except: pass
+        
+        await users_col.update_one({"user_id": user_id}, {"$inc": {"p_index": len(files)}})
+
+    else:
+        me = await client.get_me()
+        verify_url = f"https://t.me/{me.username}?start=verify_{user_id}"
+        short_link = await get_shortlink(verify_url)
+        txt = "🚫 **ভেরিফিকেশন বাধ্যতামূলক!**\n\nফাইল পেতে নিচের লিংকে ক্লিক করে ভেরিফাই করুন। প্রিমিয়াম মেম্বার হলে সরাসরি ভিডিও পাবেন।"
+        btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 ভেরিফাই লিংক", url=short_link)]])
+        if is_cb: await update.message.reply(txt, reply_markup=btn); await update.answer()
+        else: await update.reply(txt, reply_markup=btn)
 
 @app.on_message(filters.command("skipfile"))
 async def skip_file_handler(client, message):
@@ -279,6 +268,7 @@ async def stats_handler(client, message):
         f"👥 **মোট ইউজার:** `{total_users}` জন\n"
         f"💎 **প্রিমিয়াম মেম্বার:** `{premium_users}` জন\n"
         f"👤 **সাধারণ মেম্বার:** `{regular_users}` জন\n\n"
+        f"📢 **যুক্ত চ্যানেল সংখ্যা:** `২টি` (File & Log)\n"
         "⚡ **বট স্ট্যাটাস:** সচল (Active)"
     )
     
@@ -328,57 +318,96 @@ async def redeem_cmd(client, message):
     await redeem_col.update_one({"code": code_str}, {"$set": {"is_used": True}})
     await send_premium_report(client, message.from_user.id, expiry, method=f"Redeem Code ({data['duration']})")
 
-# ==================== ৬. অ্যাডমিন কমান্ডসমূহ (Custom Cmd & Limits) ====================
+# ==================== ৫. অ্যাডমিন কমান্ডসমূহ ====================
 
+# --- নতুন আপডেট: /addcmd কমান্ড ---
 @app.on_message(filters.command("addcmd") & filters.user(ADMIN_ID))
-async def add_custom_cmd(client, message):
-    """কাস্টম কমান্ড যোগ করার অ্যাডমিন কমান্ড"""
+async def add_custom_command_handler(client, message):
     if len(message.command) < 3:
-        return await message.reply("📝 **ব্যবহার:** `/addcmd [কমান্ড_নাম] [চ্যানেল_আইডি]`\n\nউদা: `/addcmd movies -10012345678`")
+        return await message.reply("📝 **ব্যবহার:** `/addcmd কমান্ড_নাম চ্যানেল_আইডি`\n\nউদাহরণ: `/addcmd adult -10012345678` (কমান্ডটি /adult হিসেবে কাজ করবে)")
     
-    cmd_name = message.command[1].lower().replace("/", "")
+    cmd_name = message.command[1].lower()
     try:
-        chat_id = int(message.command[2])
-        # কমান্ড এবং চ্যানেল আইডি ডাটাবেসে সেভ করা
-        await custom_cmds_col.update_one({"cmd": cmd_name}, {"$set": {"chat_id": chat_id}}, upsert=True)
-        await message.reply(f"✅ সফল! এখন থেকে `/{cmd_name}` কমান্ড দিলে `{chat_id}` চ্যানেলের ফাইল যাবে।")
-    except ValueError:
-        await message.reply("❌ চ্যানেল আইডি অবশ্যই সংখ্যা হতে হবে (উদা: -100xxxx)")
+        target_chat_id = int(message.command[2])
+        # ডাটাবেসে কমান্ড ও চ্যানেল সেভ
+        await custom_cmds_col.update_one(
+            {"cmd": cmd_name}, 
+            {"$set": {"chat_id": target_chat_id, "created_at": datetime.now()}}, 
+            upsert=True
+        )
+        await message.reply(f"✅ সফল! নতুন কমান্ড `/{cmd_name}` সেট করা হয়েছে যা `{target_chat_id}` চ্যানেল থেকে ফাইল দিবে।")
+    except:
+        await message.reply("❌ ভুল চ্যানেল আইডি! শুধুমাত্র সংখ্যা দিন (যেমন: -100xxxx)")
 
-@app.on_message(filters.command("delcmd") & filters.user(ADMIN_ID))
-async def del_custom_cmd(client, message):
-    """কাস্টম কমান্ড ডিলিট করার অ্যাডমিন কমান্ড"""
-    if len(message.command) < 2:
-        return await message.reply("📝 **ব্যবহার:** `/delcmd [কমান্ড_নাম]`")
+# --- ডাইনামিক কমান্ড হ্যান্ডলার (নতুন চ্যানেল থেকে ফাইল পাঠাতে) ---
+@app.on_message(filters.text & filters.private)
+async def handle_dynamic_commands(client, message):
+    if not message.text.startswith("/"): return
     
-    cmd_name = message.command[1].lower().replace("/", "")
-    await custom_cmds_col.delete_one({"cmd": cmd_name})
-    await message.reply(f"✅ কমান্ড `/{cmd_name}` ডিলিট করা হয়েছে।")
-
-# ডায়নামিক কাস্টম কমান্ড রিসিভার (ইউজার যখন /movies লিখবে)
-@app.on_message(filters.regex(r"^/"))
-async def dynamic_cmd_handler(client, message):
-    cmd = message.text.split()[0].lower().replace("/", "")
+    cmd_input = message.text.split()[0][1:].lower()
     
-    # বটের মেইন কমান্ডগুলো ইগনোর করা
-    main_cmds = ["start", "getfile", "stats", "plan", "redeem", "skipfile", "sendvideo", "index", "batch_index", "cleardata", "add_premium", "remove_premium", "add_redeem", "addplan", "delplan", "set_shortener", "del_shortener", "addtime", "deltime", "set_forward", "addcmd", "delcmd"]
-    if cmd in main_cmds:
+    # মেইন কমান্ডগুলো এড়িয়ে যাওয়া
+    if cmd_input in ["start", "getfile", "skipfile", "stats", "plan", "redeem", "index", "batch_index", "addcmd"]:
         return
 
-    # ডাটাবেসে কমান্ডটি আছে কিনা চেক করা
-    data = await custom_cmds_col.find_one({"cmd": cmd})
-    if data:
-        await process_file_request(client, message, cmd, data["chat_id"])
+    # ডাটাবেসে এই কমান্ডটি আছে কিনা চেক করা
+    cmd_data = await custom_cmds_col.find_one({"cmd": cmd_input})
+    if not cmd_data: return
+
+    user_id = message.from_user.id
+    target_channel = cmd_data["chat_id"]
+    
+    # ইউজারের এই কমান্ডের জন্য আলাদা ইনডেক্স মেইনটেইন করা
+    user_data = await users_col.find_one({"user_id": user_id})
+    # 'custom_indexes' ডিকশনারিতে কমান্ড অনুযায়ী ইনডেক্স থাকবে
+    custom_indexes = user_data.get("custom_indexes", {})
+    current_idx = custom_indexes.get(cmd_input, 0)
+    
+    is_prem, _ = await check_premium(user_id)
+    limit_val = await get_video_limit()
+
+    if is_prem:
+        # প্রিমিয়াম ইউজার সরাসরি পাবে (মেইন ফাইল চ্যানেলের সাথে কোন সম্পর্ক নেই)
+        # এখানে নির্দিষ্ট চ্যানেল থেকে মেসেজ পাঠানোর জন্য history থেকে নেওয়া হচ্ছে অথবা আলাদা logic
+        try:
+            sent_count = 0
+            p_on = await is_protect_on()
+            timer_data = await settings_col.find_one({"id": "auto_delete"})
+            
+            # নির্দিষ্ট চ্যানেলের মেসেজ হিস্টোরি থেকে ফাইল খুজে বের করা
+            files_found = []
+            async for m in client.get_chat_history(target_channel, offset_id=current_idx if current_idx > 0 else 0, limit=100):
+                if m.video or m.document or m.audio:
+                    files_found.append(m.id)
+                if len(files_found) >= limit_val: break
+
+            if not files_found:
+                return await message.reply("এই চ্যানেলে আর কোন ফাইল পাওয়া যায়নি বা ইনডেক্স শেষ।")
+
+            for msg_id in files_found:
+                sent_msg = await client.copy_message(user_id, target_channel, msg_id, protect_content=p_on)
+                if sent_msg and timer_data:
+                    asyncio.create_task(auto_delete_msg(client, user_id, sent_msg.id, timer_data["seconds"]))
+                last_sent_id = msg_id
+            
+            # ইউজারের ইনডেক্স আপডেট (কমান্ড ভিত্তিক)
+            await users_col.update_one({"user_id": user_id}, {"$set": {f"custom_indexes.{cmd_input}": files_found[-1]}})
+        except Exception as e:
+            await message.reply(f"Error: {e}")
+    else:
+        # সাধারণ ইউজারদের ভেরিফাই করতে বলা হবে
+        await message.reply("🚫 এই ক্যাটাগরির ফাইল পেতে আপনাকে প্রিমিয়াম হতে হবে অথবা মেইন গেট ফাইল ভেরিফাই করতে হবে। (অথবা আপনার ইচ্ছেমতো শর্টলিংক লজিক এখানে দিতে পারেন)")
+
+# --- বাকি সব অ্যাডমিন কমান্ড আগের মতোই ---
 
 @app.on_message(filters.command("sendvideo") & filters.user(ADMIN_ID))
 async def set_send_video_limit(client, message):
     if len(message.command) < 2:
-        return await message.reply("📝 **সঠিক ব্যবহার:** `/sendvideo সংখ্যা` (যেমন: `/sendvideo 5`)")
+        return await message.reply("📝 **সঠিক ব্যবহার:** `/sendvideo संख्या` (যেমন: `/sendvideo 5`)")
     try:
         count = int(message.command[1])
         if count < 1:
             return await message.reply("❌ সংখ্যা অবশ্যই ১ এর বেশি হতে হবে।")
-        
         await settings_col.update_one({"id": "video_limit"}, {"$set": {"count": count}}, upsert=True)
         await message.reply(f"✅ সফল! এখন থেকে প্রতি ক্লিকে **{count}টি** করে ভিডিও পাঠানো হবে।")
     except ValueError:
@@ -389,14 +418,15 @@ async def index_files_handler(client, message):
     status_msg = await message.reply("🔍 ইন্ডেক্সিং শুরু হচ্ছে... অনুগ্রহ করে অপেক্ষা করুন।")
     count = 0
     try:
-        # মেইন চ্যানেলের ফাইল ইনডেক্স করা (নতুন স্ট্রাকচার: chat_id সহ)
         async for m in client.get_chat_history(FILE_CHANNEL):
             if m.video or m.document or m.audio:
-                exists = await files_col.find_one({"msg_id": m.id, "chat_id": FILE_CHANNEL})
+                exists = await files_col.find_one({"msg_id": m.id})
                 if not exists:
-                    await files_col.insert_one({"msg_id": m.id, "chat_id": FILE_CHANNEL, "added_at": datetime.now()})
+                    await files_col.insert_one({"msg_id": m.id, "added_at": datetime.now()})
                     count += 1
-        await status_msg.edit(f"✅ ইন্ডেক্সিং সম্পন্ন! ফাইল সেভ হয়েছে: `{count}` টি।")
+                    if count % 50 == 0:
+                        await status_msg.edit(f"⏳ প্রসেসিং চলছে... {count} টি নতুন ফাইল পাওয়া গেছে।")
+        await status_msg.edit(f"✅ ইন্ডেক্সিং সম্পন্ন!\n\n📂 মোট নতুন ফাইল সেভ হয়েছে: `{count}` টি।")
     except Exception as e:
         await status_msg.edit(f"❌ ভুল হয়েছে: {e}")
 
@@ -408,28 +438,26 @@ async def batch_index_handler(client, message):
     chat_id, last_id = parse_tg_link(link)
     if not chat_id:
         return await message.reply("❌ ভুল লিংক! লাস্ট মেসেজের লিংক দিন।")
-
-    status = await message.reply(f"🔍 ইনডেক্সিং শুরু হচ্ছে...")
+    status = await message.reply(f"🔍 ইনডেক্সিং শুরু হচ্ছে...\nচ্যানেল: `{chat_id}`\nশেষ আইডি: `{last_id}`")
     count = 0
     for i in range(1, last_id + 1):
         try:
-            # মেসেজটি FILE_CHANNEL-এ কপি করা
             msg = await client.copy_message(chat_id=FILE_CHANNEL, from_chat_id=chat_id, message_id=i)
             if msg.video or msg.document or msg.audio:
-                await files_col.insert_one({"msg_id": msg.id, "chat_id": FILE_CHANNEL, "added_at": datetime.now()})
+                await files_col.insert_one({"msg_id": msg.id, "added_at": datetime.now()})
                 count += 1
-            if i % 25 == 0: await status.edit(f"⏳ প্রসেসিং চলছে... সেভ হয়েছে: {count}")
+            if i % 25 == 0:
+                await status.edit(f"⏳ প্রসেসিং চলছে...\nচেক করা হয়েছে: {i}/{last_id}\nসেভ হয়েছে: {count}")
             await asyncio.sleep(0.5)
         except: continue
-    await status.edit(f"✅ সম্পন্ন! মোট সেভ হয়েছে: `{count}` টি।")
+    await status.edit(f"✅ **ইনডেক্সিং সম্পন্ন!**\n\n📂 মোট সেভ হয়েছে: `{count}` টি।")
 
 @app.on_message(filters.command("cleardata") & filters.user(ADMIN_ID))
 async def cleardata_admin(client, message):
     try:
         await files_col.delete_many({})
-        # ইনডেক্সগুলো রিসেট করা
         await users_col.update_many({}, {"$set": {"p_index": 0, "f_index": 0, "custom_indexes": {}}})
-        await message.reply("✅ ডাটাবেস সম্পূর্ণ ক্লিয়ার করা হয়েছে।")
+        await message.reply("✅ ডাটাবেস থেকে সকল ফাইল এবং ইউজার ইনডেক্স ডিলিট করা হয়েছে!")
     except Exception as e:
         await message.reply(f"Error: {e}")
 
@@ -514,18 +542,15 @@ async def set_fwd_admin(client, message):
         await message.reply(f"✅ অ্যান্টি-ফরোয়ার্ড {status} হয়েছে।")
     except: await message.reply("নিয়ম: `/set_forward on/off`")
 
-# ==================== ৭. স্মার্ট অটো সেভ হ্যান্ডলার (সংশোধিত) ====================
+# ==================== ৬. অটো সেভ ও ফাইল হ্যান্ডলার ====================
 
-@app.on_message((filters.chat(FILE_CHANNEL) | filters.chat(-10012345678)) & (filters.video | filters.document | filters.audio)) # উদাহরণ আইডি
+@app.on_message(filters.chat(FILE_CHANNEL) & (filters.video | filters.document | filters.audio))
 async def auto_save_handler(client, message):
-    # চ্যানেল আইডি অনুযায়ী ফাইল সেভ করা
-    chat_id = message.chat.id
-    if message.text and message.text.startswith("/"):
-        return
-    await files_col.insert_one({"msg_id": message.id, "chat_id": chat_id, "added_at": datetime.now()})
-    await client.send_message(LOG_CHANNEL, f"✅ নতুন ফাইল সেভ হয়েছে! চ্যানেল: `{chat_id}` ID: `{message.id}`")
+    if message.text and message.text.startswith("/"): return
+    await files_col.insert_one({"msg_id": message.id, "added_at": datetime.now()})
+    await client.send_message(LOG_CHANNEL, f"✅ নতুন ফাইল সেভ হয়েছে! ID: `{message.id}`")
 
-# ==================== ৮. রান কমান্ডস ও ওয়েব সার্ভার ====================
+# ==================== ৭. রান কমান্ডস ও ওয়েব সার্ভার ====================
 
 async def uptime_handler(request):
     return web.Response(text="Bot is Alive! 🚀")
@@ -539,13 +564,8 @@ async def web_server():
     await web.TCPSite(runner, "0.0.0.0", port).start()
 
 async def main():
-    await web_server() # ওয়েব সার্ভার চালু হলো
-    await app.start() # বট চালু হলো
-    try:
-        await app.get_chat(FILE_CHANNEL)
-    except:
-        print("Resolve Error: FILE_CHANNEL Access Denied")
-
+    await web_server()
+    await app.start()
     print("বটটি সফলভাবে চালু হয়েছে! 🚀")
     await idle()
 
